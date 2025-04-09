@@ -215,6 +215,8 @@
     <button class="categories-button" onclick="window.location.href='{{ url('/categories') }}'">Go to Categories Page</button>
     <!-- "Train Data" button with original URL -->
     <button class="extra-button" onclick="window.location.href='/train-data/upload'">Train Data</button>
+    <!-- New "View Evaluation Reports" button -->
+    <button class="extra-button" onclick="window.location.href='{{ route('train_reports.index') }}'">View Evaluation Reports</button>
   </div>
 
   <!-- Main Container -->

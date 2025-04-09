@@ -48,3 +48,9 @@ Route::post('/train-data/upload', [TrainDataController::class, 'upload'])->name(
 
 Route::get('/income', [FinancialDataController::class, 'incomeData']);
 Route::get('/expenses', [FinancialDataController::class, 'consumerExpenseData']);
+
+
+use App\Http\Controllers\TrainReportController;
+
+Route::get('/train-reports', [TrainReportController::class, 'index'])->name('train_reports.index');
+Route::get('/train-reports/{id}', [TrainReportController::class, 'show'])->name('train_reports.show');

@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import nltk
 from collections import Counter
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sklearn.preprocessing import LabelEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import StratifiedShuffleSplit, RandomizedSearchCV
@@ -20,7 +20,7 @@ from scipy.stats import uniform, randint
 nltk.download('wordnet')
 nltk.download('omw-1.4')
 
-# Import custom preprocessor (ensure it includes any additional cleaning like lemmatization if needed)
+# Import custom preprocessor (ensure it includes additional cleaning like lemmatization if needed)
 from preprocessing import custom_preprocessor
 
 def determine_type(desc):
@@ -53,20 +53,20 @@ def filter_small_categories(data, min_samples=2):
     category_counts = data['category'].value_counts()
     small_categories = category_counts[category_counts < min_samples].index
     filtered_data = data[~data['category'].isin(small_categories)]
-    print(f"Filtered out {len(small_categories)} small categories: {small_categories}")
+    print(f"Filtered out {len(small_categories)} small categories: {small_categories.tolist()}")
     return filtered_data
 
 def train_category_model(X_train, y_train):
     category_counts = Counter(y_train)
     min_samples = min(category_counts.values())
 
-    # Use RandomOverSampler if any fold might have too few samples (e.g. less than 4)
+    # Use RandomOverSampler if any fold might have too few samples (e.g. less than 4); else use SMOTE.
     if min_samples < 4:
         oversampler = RandomOverSampler(random_state=42)
     else:
         oversampler = SMOTE(random_state=42, k_neighbors=max(1, min_samples - 1))
 
-    # Compute class weights for the imbalance
+    # Compute class weights for the imbalance (for logging purposes)
     class_weights = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
     weight_dict = {i: class_weights[i] for i in range(len(class_weights))}
 
@@ -75,7 +75,7 @@ def train_category_model(X_train, y_train):
         use_label_encoder=False,
         eval_metric="mlogloss",
         objective='multi:softprob',
-        scale_pos_weight=weight_dict
+        scale_pos_weight=weight_dict  # Note: scale_pos_weight is not typically used for multi-class, but left here if desired.
     )
     param_dist = {
         'clf__n_estimators': randint(100, 300),
@@ -107,13 +107,17 @@ def train_category_model(X_train, y_train):
     return search.best_estimator_
 
 def train_type_model(X, y_type):
-    return XGBClassifier(
-        use_label_encoder=False,
-        eval_metric="logloss",
-        n_estimators=100,
-        learning_rate=0.1,
-        max_depth=5
-    ).fit(X, y_type)
+    try:
+        return XGBClassifier(
+            use_label_encoder=False,
+            eval_metric="logloss",
+            n_estimators=100,
+            learning_rate=0.1,
+            max_depth=5
+        ).fit(X, y_type)
+    except Exception as e:
+        print("Error training type model:", e)
+        raise
 
 def plot_precision_recall_curve(y_true, y_pred_proba, classes):
     """Plot precision-recall curve for each class."""
@@ -128,7 +132,24 @@ def plot_precision_recall_curve(y_true, y_pred_proba, classes):
     plt.legend(loc='best')
     plt.show()
 
+def insert_classification_report(engine, report_str):
+    """Insert the classification report into the model_evaluations table."""
+    try:
+        with engine.begin() as connection:
+            insert_stmt = text("""
+                INSERT INTO model_evaluations (evaluation_type, report, created_at)
+                VALUES (:evaluation_type, :report, NOW())
+            """)
+            connection.execute(insert_stmt, {
+                "evaluation_type": "Category Classification Report",
+                "report": report_str
+            })
+        print("Evaluation report inserted into database successfully.")
+    except Exception as e:
+        print("Error inserting evaluation report:", e)
+
 def main():
+    # Get MySQL connection details from environment variables
     MYSQL_USER = os.getenv("MYSQL_USER", "laraveluser")
     MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "secret")
     MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
@@ -153,7 +174,7 @@ def main():
     # Filter out categories with too few samples
     data = filter_small_categories(data, min_samples=2)
 
-    # Vectorization
+    # Vectorization using TF-IDF
     vectorizer = build_vectorizer()
     X_all = vectorizer.fit_transform(data['description'])
 
@@ -161,36 +182,53 @@ def main():
     y_category = le_category.fit_transform(data['category'])
     y_type = le_type.fit_transform(data['type'])
 
-    # Stratified split for ensuring balanced class distribution
+    # Stratified split for balanced class distribution
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
     for train_index, test_index in sss.split(X_all, y_category):
         X_train, X_test = X_all[train_index], X_all[test_index]
         y_train, y_test = y_category[train_index], y_category[test_index]
 
     # Train category model with hyperparameter tuning
+    print("Training category model...")
     model_category = train_category_model(X_train, y_train)
     y_pred = model_category.predict(X_test)
 
     print("Category Model - Confusion Matrix:")
     print(confusion_matrix(y_test, y_pred))
     target_names = le_category.inverse_transform(np.unique(y_test))
+    report_str = classification_report(
+        y_test, y_pred,
+        labels=np.unique(y_test),
+        target_names=target_names,
+        zero_division=0
+    )
     print("Category Model - Classification Report:")
-    print(classification_report(y_test, y_pred, labels=np.unique(y_test), target_names=target_names, zero_division=0))
+    print(report_str)
 
-    # Get prediction probabilities for precision-recall curve
+    # Insert classification report into the database
+    insert_classification_report(engine, report_str)
+
+    # Get prediction probabilities for precision-recall curve and plot
     y_pred_proba = model_category.predict_proba(X_test)
-
-    # Plot Precision-Recall curves
     plot_precision_recall_curve(y_test, y_pred_proba, target_names)
 
     # Train type model
+    print("Training type model...")
     model_type = train_type_model(X_all, y_type)
 
-    # Save models and encoders
+    # Save models, vectorizer, and label encoders
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    for name, model in [('model_category.pkl', model_category), ('model_type.pkl', model_type), ('vectorizer.pkl', vectorizer), ('le_category.pkl', le_category), ('le_type.pkl', le_type)]:
+    artifacts = [
+        ('model_category.pkl', model_category),
+        ('model_type.pkl', model_type),
+        ('vectorizer.pkl', vectorizer),
+        ('le_category.pkl', le_category),
+        ('le_type.pkl', le_type)
+    ]
+    for name, obj in artifacts:
         with open(os.path.join(script_dir, name), 'wb') as f:
-            pickle.dump(model, f)
+            pickle.dump(obj, f)
+        print(f"Saved {name}")
 
     print("Models, vectorizer, and label encoders saved successfully.")
 
