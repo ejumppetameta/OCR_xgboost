@@ -1,0 +1,16 @@
+FROM python:3.10-slim
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Pre-download required NLTK resources to avoid runtime delays
+RUN python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
+
+# Copy all files (including api.py, train_model.py, preprocessing.py, etc.)
+COPY . .
+
+EXPOSE 5000
+
+CMD ["python", "api.py"]
