@@ -19,8 +19,10 @@ class CsvVtableController extends Controller
      * Process a CSV bank statement and save all transactions only to the VTable.
      *
      * Expected CSV format:
-     *   Header row: Date, Description, Debit, Credit, Balance
-     *   Each row represents one transaction.
+     *   For the standard 5-column CSV:
+     *     Header row: Date, Description, Debit, Credit, Balance
+     *   For the extended CSV:
+     *     Columns: Serial, ID, Date, Description, Category, Debit, Credit, Balance, etc.
      *
      * @param \Illuminate\Http\Request $request
      * @return \Illuminate\Http\JsonResponse
@@ -80,7 +82,7 @@ class CsvVtableController extends Controller
                 'account_holder'  => 'CSV Account Holder',
                 'account_number'  => 'Unknown',
                 'account_type'    => 'Unknown',
-                'closing_balance' => 0, // Will update at end.
+                'closing_balance' => 0, // Will update later.
                 'statement_date'  => now()->format('Y-m-d'),
             ]);
 
@@ -94,22 +96,38 @@ class CsvVtableController extends Controller
 
                 Log::debug('CSV row data:', $data);
 
-                // Expect columns: Date, Description, Debit, Credit, Balance.
-                if (count($data) < 5) {
+                // Check CSV structure – use correct column indices for each format.
+                if (count($data) === 5) {
+                    // Standard CSV format: [0] Date, [1] Description, [2] Debit, [3] Credit, [4] Balance.
+                    $rawDate     = $data[0];
+                    $description = trim($data[1]);
+                    $debit       = floatval(str_replace([','], '', $data[2]));
+                    $credit      = floatval(str_replace([','], '', $data[3]));
+                    $balanceVal  = floatval(str_replace([','], '', $data[4]));
+                } elseif (count($data) >= 8) {
+                    // Extended CSV format: e.g., [0] Serial, [1] ID, [2] Date, [3] Description, [4] Category,
+                    // [5] Debit, [6] Credit, [7] Balance, etc.
+                    $rawDate     = $data[2];
+                    $description = trim($data[3]);
+                    $debit       = floatval(str_replace([','], '', $data[5]));
+                    $credit      = floatval(str_replace([','], '', $data[6]));
+                    $balanceVal  = floatval(str_replace([','], '', $data[7]));
+                } else {
                     Log::warning('Row skipped because it does not have enough columns', $data);
-                    continue; // Skip rows that don't match the expected count.
+                    continue;
                 }
 
                 // Convert the CSV date to Y-m-d format.
-                $rawDate = $data[0];
-                $transactionDate = date('Y-m-d', strtotime($rawDate));
+                // Try using a specific format first (e.g., 'd/m/Y'); adjust as necessary.
+                $dateObj = \DateTime::createFromFormat('d/m/Y', $rawDate);
+                if ($dateObj) {
+                    $transactionDate = $dateObj->format('Y-m-d');
+                } else {
+                    // Fallback to strtotime in case the format is different.
+                    $transactionDate = date('Y-m-d', strtotime($rawDate));
+                }
 
-                $description = trim($data[1]);
-                $debit = floatval(str_replace([','], '', $data[2]));
-                $credit = floatval(str_replace([','], '', $data[3]));
-                $balanceVal = floatval(str_replace([','], '', $data[4]));
-
-                // Determine transaction type (Credit if any credit amount; otherwise Debit).
+                // Determine transaction type: Credit if any credit amount; otherwise Debit.
                 $type = ($credit > 0) ? 'CR' : 'DR';
 
                 // Use the shared determineCategory() logic from our trait.
